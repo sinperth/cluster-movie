@@ -6,20 +6,13 @@ import streamlit as st
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
-
 DATA_URL = "https://raw.githubusercontent.com/it-teacher-go/data-share-/main/kobis_movies.csv"
-
-st.set_page_config(
-    page_title="영화 유형 나누기",
-    page_icon="🎬",
-    layout="wide",
-)
-
-st.title("🎬 영화 유형 나누기")
-st.write("영화의 흥행 규모와 롱런 특성을 바탕으로 비슷한 영화끼리 묶어 봅니다.")
-
 FEATURES = ["로그 스크린 수", "로그 누적 관객", "10위권 일수", "롱런 지수"]
 CLUSTER_LABELS = ["㉮", "㉯", "㉰"]
+
+st.set_page_config(page_title="영화 유형 나누기", page_icon="🎬", layout="wide")
+st.title("🎬 영화 유형 나누기")
+st.write("영화의 흥행 규모와 롱런 특성을 바탕으로 비슷한 영화끼리 묶어 봅니다.")
 
 
 @st.cache_data(ttl=3600)
@@ -40,6 +33,9 @@ except Exception as exc:
     st.code(str(exc))
     st.stop()
 
+# 열 이름에 실수로 들어간 앞뒤 공백이 있어도 처리합니다.
+raw.columns = [str(column).strip() for column in raw.columns]
+
 required_columns = [
     "movieCd", "movieNm", "openDt", "genre", "nation",
     "first_scrn", "first_show", "first_date", "peak",
@@ -58,24 +54,33 @@ data = raw.copy()
 for column in ["first_scrn", "first_week_audi", "total_audi", "days_in_top10"]:
     data[column] = pd.to_numeric(data[column], errors="coerce")
 
-# 롱런 지수: 누적 관객 / 첫 주 관객. 20을 넘으면 20으로 제한합니다.
+# 네 가지 군집화용 열을 결측값 검사보다 먼저 모두 생성합니다.
 data["롱런 지수"] = float("nan")
-valid_first_week = data["first_week_audi"] > 0
+valid_first_week = data["first_week_audi"].notna() & (data["first_week_audi"] > 0)
 data.loc[valid_first_week, "롱런 지수"] = (
     data.loc[valid_first_week, "total_audi"]
     / data.loc[valid_first_week, "first_week_audi"]
 )
 data.loc[data["롱런 지수"] > 20, "롱런 지수"] = 20
 
-# 로그는 양수에 대해서만 계산합니다.
 data["로그 스크린 수"] = data["first_scrn"].map(
-    lambda value: math.log10(value) if pd.notna(value) and value > 0 else float("nan")
+    lambda value: math.log10(value)
+    if pd.notna(value) and value > 0
+    else float("nan")
 )
 data["로그 누적 관객"] = data["total_audi"].map(
-    lambda value: math.log10(value) if pd.notna(value) and value > 0 else float("nan")
+    lambda value: math.log10(value)
+    if pd.notna(value) and value > 0
+    else float("nan")
 )
 
-# 네 속성 중 하나라도 결측이거나 첫 주 관객이 0 이하인 영화는 제외합니다.
+# 생성 여부를 확인해 열 누락으로 인한 KeyError를 방지합니다.
+missing_features = [feature for feature in FEATURES if feature not in data.columns]
+if missing_features:
+    st.error("분석용 속성을 만들지 못했습니다: " + ", ".join(missing_features))
+    st.write("현재 열 이름:", ", ".join(map(str, data.columns)))
+    st.stop()
+
 valid_mask = (
     data["first_scrn"].notna()
     & data["total_audi"].notna()
@@ -96,7 +101,7 @@ if len(data) < 3:
 
 st.subheader("1. 군집화에 사용할 속성")
 selected_features = st.multiselect(
-    "군집화에 사용할 속성을 두 개 이상 선택하세요.",
+    "군집화에 사용할 속성을 두 개 이상 선택하세요. 기본값은 네 속성 전체입니다.",
     options=FEATURES,
     default=FEATURES,
 )
@@ -105,10 +110,8 @@ if len(selected_features) < 2:
     st.warning("속성을 두 개 이상 선택해야 합니다.")
     st.stop()
 
-# 선택된 속성을 표준화한 뒤 k-평균으로 세 군집을 만듭니다.
 X = data[selected_features].astype(float)
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
+X_scaled = StandardScaler().fit_transform(X)
 
 try:
     model = KMeans(n_clusters=3, random_state=42, n_init=10)
@@ -118,7 +121,7 @@ except Exception as exc:
     st.code(str(exc))
     st.stop()
 
-# 누적 관객 평균이 큰 군집부터 ㉮, ㉯, ㉰를 부여합니다.
+# 누적 관객 평균이 높은 군집부터 ㉮, ㉯, ㉰를 지정합니다.
 cluster_means = data.groupby("군집 번호")["total_audi"].mean().sort_values(ascending=False)
 label_map = {
     cluster_id: CLUSTER_LABELS[index]
@@ -127,22 +130,11 @@ label_map = {
 data["영화 유형"] = data["군집 번호"].map(label_map)
 
 st.subheader("2. 2차원 산점도")
-axis_col1, axis_col2 = st.columns(2)
-
-with axis_col1:
-    x_axis = st.selectbox(
-        "가로축 속성",
-        options=selected_features,
-        index=0,
-        key="scatter_x",
-    )
-with axis_col2:
-    y_axis = st.selectbox(
-        "세로축 속성",
-        options=selected_features,
-        index=1,
-        key="scatter_y",
-    )
+col1, col2 = st.columns(2)
+with col1:
+    x_axis = st.selectbox("가로축 속성", selected_features, index=0, key="scatter_x")
+with col2:
+    y_axis = st.selectbox("세로축 속성", selected_features, index=1, key="scatter_y")
 
 fig2 = px.scatter(
     data,
@@ -162,13 +154,12 @@ st.subheader("3. 3차원 산점도")
 if len(selected_features) < 3:
     st.info("3차원 산점도를 보려면 군집화 속성을 세 개 이상 선택해 주세요.")
 else:
-    col_x, col_y, col_z = st.columns(3)
-
-    with col_x:
+    c1, c2, c3 = st.columns(3)
+    with c1:
         x3 = st.selectbox("X축 속성", selected_features, index=0, key="scatter3_x")
-    with col_y:
+    with c2:
         y3 = st.selectbox("Y축 속성", selected_features, index=1, key="scatter3_y")
-    with col_z:
+    with c3:
         z3 = st.selectbox("Z축 속성", selected_features, index=2, key="scatter3_z")
 
     fig3 = px.scatter_3d(
@@ -198,12 +189,10 @@ summary = (
     )
     .reset_index()
 )
-
 summary["영화 유형"] = pd.Categorical(
     summary["영화 유형"], categories=CLUSTER_LABELS, ordered=True
 )
 summary = summary.sort_values("영화 유형").reset_index(drop=True)
-
 display_summary = summary.rename(
     columns={
         "스크린_수_평균": "스크린 수 평균",
@@ -214,16 +203,10 @@ display_summary = summary.rename(
 ).copy()
 
 display_summary["편수"] = display_summary["편수"].map(lambda value: f"{value:,}")
-display_summary["스크린 수 평균"] = display_summary["스크린 수 평균"].map(
-    lambda value: f"{value:,.1f}"
-)
+display_summary["스크린 수 평균"] = display_summary["스크린 수 평균"].map(lambda value: f"{value:,.1f}")
 display_summary["누적 관객 평균"] = display_summary["누적 관객 평균"].map(format_number)
-display_summary["10위권 일수 평균"] = display_summary["10위권 일수 평균"].map(
-    lambda value: f"{value:,.1f}"
-)
-display_summary["롱런 지수 평균"] = display_summary["롱런 지수 평균"].map(
-    lambda value: f"{value:.2f}"
-)
+display_summary["10위권 일수 평균"] = display_summary["10위권 일수 평균"].map(lambda value: f"{value:,.1f}")
+display_summary["롱런 지수 평균"] = display_summary["롱런 지수 평균"].map(lambda value: f"{value:.2f}")
 st.dataframe(display_summary, use_container_width=True, hide_index=True)
 
 st.caption(
@@ -241,7 +224,6 @@ for label in CLUSTER_LABELS:
         .rename(columns={"movieNm": "영화 제목", "total_audi": "누적 관객"})
         .copy()
     )
-
     if top.empty:
         st.write("해당 유형에 영화가 없습니다.")
     else:
@@ -250,8 +232,13 @@ for label in CLUSTER_LABELS:
         st.dataframe(top, use_container_width=True, hide_index=True)
 
 with st.expander("분석에 사용한 영화 데이터 보기"):
-    visible_columns = [
-        "movieNm", "영화 유형", "first_scrn", "total_audi",
-        "days_in_top10", "first_week_audi", "롱런 지수",
-    ]
-    st.dataframe(data[visible_columns], use_container_width=True, hide_index=True)
+    st.dataframe(
+        data[
+            [
+                "movieNm", "영화 유형", "first_scrn", "total_audi",
+                "days_in_top10", "first_week_audi", "롱런 지수",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
